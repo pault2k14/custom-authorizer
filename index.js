@@ -1,71 +1,53 @@
 "use strict";
 
-var AWS = require('aws-sdk');
-var exec = require('child_process').exec;
-var fs = require('fs');
+var jwt = require('jsonwebtoken');
 
-process.env['PATH'] = process.env['PATH'] + ':' +
-    process.env['LAMBDA_TASK_ROOT'];
+var generatePolicy = function(principalId, effect, resource) {
+    var authResponse = {};
+    authResponse.principalId = principalId;
+    if (effect && resource) {
+        var policyDocument = {};
+        policyDocument.Version = '2012-10-17';
+        policyDocument.Statement = [];
+        var statementOne = {};
+        statementOne.Action = 'execute-api:Invoke';
+        statementOne.Effect = effect;
+        statementOne.Resource = resource;
+        policyDocument.Statement[0] = statementOne;
+        authResponse.policyDocument = policyDocument;
+    }
+    return authResponse;
+};
 
-var s3 = new AWS.S3();
-
-function saveMetadataToS3(body, bucket, key, callback) {
-    console.log("Saving metadata to s3");
-
-    s3.putObject({
-        Bucket: bucket,
-        Key: key,
-        Body: body
-    }, function(error, data){
-        if (error) {
-            callback(error);
-        }
-    });
-}
-
-function extractMetadata(sourceBucket, sourceKey, localFilename, callback) {
-    console.log('Extracting metadata')
-
-    var cmd = 'bin/ffprobe -v quiet -print format json -show_format "/temp/'
-        + localFilename + '"';
-
-    exec(cmd, function(error, stdout, stderr) {
-        if(error === null) {
-            var metadataKey = sourceKey.split('.')[0] + '.json';
-            saveMetadataToS3(stdout, sourceBucket, metadataKey, callback);
-        } else {
-            console.log(stderr);
-            callback(error);
-        }
-    });
-}
-
-function saveFileToFilesystem(sourceBucket, sourceKey, callback) {
-    console.log('Saving to filesystem');
-
-    var localFilename = sourceKey.split('/').pop();
-    var file = fs.createWriteStream('/tmp/' + localFilename);
-
-    var stream = s3.getObject({
-        Bucket: sourceBucket,
-        Key: sourceKey
-    }).createReadStream().pipe(file);
-
-    stream.on('error', function(error){
-        callback(error);
-    });
-
-    stream.on('close', function() {
-        extractMetadata(sourceBucket, sourceKey, localFilename, callback);
-    });
-}
 
 exports.handler = function(event, context, callback) {
-    var message = JSON.parse(event.Records[0].Sns.Message);
 
-    var sourceBucket = message.Records[0].s3.bucket.name;
-    var sourceKey =
-        decodeURIComponent(message.Records[0].s3.object.key.replace(/\+/g, " "));
+    console.log(JSON.stringify(event));
 
-    saveFileToFilesystem(sourceBucket, sourceKey, callback);
-}
+    if(!event.headers.authorization) {
+        console.log(JSON.stringify(event));
+        callback('Could not find authToken');
+        return;
+    }
+
+    if(!event.headers.accesstoken) {
+        console.log(JSON.stringify(event));
+        callback('Could not find access_token');
+        return;
+    }
+
+    var id_token = event.headers.authorization.split(' ')[1];
+    var access_token = event.headers.accesstoken;
+
+    var secretBuffer = new Buffer(process.env.AUTH0_SECRET);
+    jwt.verify(id_token, secretBuffer, function(err, decoded){
+
+        if(err) {
+            console.log('Failed jwt verification: ', err,
+            'auth: ', event.headers.authorization);
+            callback('Authorization Failed');
+        } else {
+            callback(null, generatePolicy('user', 'allow', event.methodArn));
+        }
+    })
+};
